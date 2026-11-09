@@ -1,5 +1,7 @@
 import json
 import re
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -117,36 +119,48 @@ class Client:
         if self.transport:
             return self.transport(path, method, body, headers)
         req = urllib.request.Request(API + path, data=payload, headers=headers, method=method)
-        try:
-            with self.opener.open(req, timeout=15) as response:
-                if "json" not in response.headers.get("Content-Type", ""):
-                    raise ApiError("接口未返回 JSON，可能是登录或访问验证页面。")
-                data = response.read(2_000_001)
-                if len(data) > 2_000_000:
-                    raise ApiError("接口响应过大，已停止解析。")
-                return json.loads(data.decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            code = None
+        # Retry only read-only transport failures. A timed-out Key POST may have succeeded.
+        attempts = 3 if method == "GET" and body is None else 1
+        for attempt in range(attempts):
             try:
-                raw = json.loads(error.read(2000).decode("utf-8"))
-                candidate = raw.get("error", raw.get("code")) if isinstance(raw, dict) else None
-                if isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", candidate):
-                    code = candidate
+                with self.opener.open(req, timeout=15) as response:
+                    if "json" not in response.headers.get("Content-Type", ""):
+                        raise ApiError("接口未返回 JSON，可能是登录或访问验证页面。")
+                    data = response.read(2_000_001)
+                    if len(data) > 2_000_000:
+                        raise ApiError("接口响应过大，已停止解析。")
+                    return json.loads(data.decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                code = None
+                try:
+                    raw = json.loads(error.read(2000).decode("utf-8"))
+                    candidate = raw.get("error", raw.get("code")) if isinstance(raw, dict) else None
+                    if isinstance(candidate, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", candidate):
+                        code = candidate
+                except (ValueError, UnicodeError):
+                    pass
+                finally:
+                    error.close()
+                if error.code == 401:
+                    message = "API Key 未获查询授权。" if key_only else "登录会话失效，请重新登录绑定。"
+                elif error.code == 403:
+                    message = "接口拒绝访问或当前账号无此权限。"
+                elif error.code == 429:
+                    message = "接口限流，请稍后刷新。"
+                else:
+                    message = f"接口请求失败：HTTP {error.code}。"
+                raise ApiError(message, error.code, code) from None
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                reason = error.reason if isinstance(error, urllib.error.URLError) else error
+                if isinstance(reason, ssl.SSLCertVerificationError):
+                    raise ApiError("接口证书验证失败，已停止连接；请检查网络与系统时间。", code="tls_certificate_error") from None
+                if attempt + 1 < attempts:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                suffix = "（已重试 2 次）" if attempts > 1 else ""
+                raise ApiError(f"接口网络错误或超时{suffix}，请稍后重试。", code="network_error") from None
             except (ValueError, UnicodeError):
-                pass
-            if error.code == 401:
-                message = "API Key 未获查询授权。" if key_only else "登录会话失效，请重新登录绑定。"
-            elif error.code == 403:
-                message = "接口拒绝访问或当前账号无此权限。"
-            elif error.code == 429:
-                message = "接口限流，请稍后刷新。"
-            else:
-                message = f"接口请求失败：HTTP {error.code}。"
-            raise ApiError(message, error.code, code) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise ApiError("接口网络错误或超时，请稍后重试。") from None
-        except (ValueError, UnicodeError):
-            raise ApiError("接口响应不是有效的 JSON。") from None
+                raise ApiError("接口响应不是有效的 JSON。") from None
 
     def identity(self, expected_email=None):
         data = self.request("/auth/get-session")
