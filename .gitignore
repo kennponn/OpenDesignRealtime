@@ -1,0 +1,30 @@
+# Private runtime state must never enter Git.
+data/
+**/data/
+profiles/
+**/profiles/
+*.sqlite*
+*.db
+*.db-*
+*.csv
+*.har
+.env
+.env.*
+*credentials*
+*cookies*
+*session-export*
+interface-verification.json
+
+# Generated files and local tools.
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.exe
+*.zip
+*.log
+*.lnk
+.DS_Store
+Thumbs.db
